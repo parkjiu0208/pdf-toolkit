@@ -1,0 +1,11 @@
+# 빌드 산출물
+build/
+dist/
+*.spec
+
+# Tesseract 포터블 바이너리 (85MB — build.bat이 로컬 설치본에서 복사)
+vendor/
+
+# 파이썬
+__pycache__/
+*.pyc
