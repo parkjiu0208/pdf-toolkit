@@ -135,6 +135,19 @@ def pdf_extract_pages(pdf_path, pages, progress=None):
     return [out_file], out_dir
 
 
+def ocr_image(img, tess, ocr_lang="kor+eng"):
+    """PIL 이미지 한 장을 OCR. psm 3(자동 레이아웃)과 psm 6(단일 블록)을
+    모두 시도해 실제 글자(문자·숫자)를 더 많이 읽은 쪽을 채택 (한글 인식률 개선)."""
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = tess
+    candidates = []
+    for psm in ("3", "6"):
+        t = pytesseract.image_to_string(
+            img, lang=ocr_lang, config=f"--psm {psm}").strip()
+        candidates.append(t)
+    return max(candidates, key=lambda t: sum(1 for c in t if c.isalnum()))
+
+
 def pdf_to_text(pdf_path, pages, progress=None, ocr_lang="kor+eng"):
     """텍스트 추출. 텍스트 레이어가 없는 페이지는 자동으로 OCR.
     반환: (저장 파일 목록, 출력 폴더, OCR 사용한 페이지 수)"""
@@ -152,21 +165,11 @@ def pdf_to_text(pdf_path, pages, progress=None, ocr_lang="kor+eng"):
             text = page.get_text().strip()
             if not text:  # 텍스트 레이어 없음 → OCR 시도
                 if tess:
-                    import pytesseract
                     from PIL import Image
                     import io
-                    pytesseract.pytesseract.tesseract_cmd = tess
                     pix = page.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
                     img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    # psm 3(자동 레이아웃)과 psm 6(단일 블록)을 모두 시도해
-                    # 실제 글자(문자·숫자)를 더 많이 읽은 쪽을 채택 (한글 인식률 개선)
-                    candidates = []
-                    for psm in ("3", "6"):
-                        t = pytesseract.image_to_string(
-                            img, lang=ocr_lang, config=f"--psm {psm}").strip()
-                        candidates.append(t)
-                    text = max(candidates,
-                               key=lambda t: sum(1 for c in t if c.isalnum()))
+                    text = ocr_image(img, tess, ocr_lang)
                     ocr_used += 1
                 else:
                     text = "[이미지 페이지 — Tesseract 미설치로 OCR 불가]"
@@ -176,6 +179,34 @@ def pdf_to_text(pdf_path, pages, progress=None, ocr_lang="kor+eng"):
 
     out_file.write_text("\n".join(chunks), encoding="utf-8")
     return [out_file], out_dir, ocr_used
+
+
+def images_to_text(image_paths, progress=None, ocr_lang="kor+eng"):
+    """이미지(PNG/JPG 등) 여러 장을 OCR해서 텍스트 파일 하나로 저장.
+    반환: (저장 파일 목록, 출력 폴더, OCR 사용한 이미지 수)"""
+    tess = find_tesseract()
+    if not tess:
+        raise RuntimeError("이미지 OCR에는 Tesseract가 필요합니다 (README 참고).")
+
+    from PIL import Image
+    first = Path(image_paths[0])
+    out_dir = make_output_dir(first)
+    out_file = out_dir / f"{first.stem}_텍스트.txt"
+
+    chunks = []
+    for i, p in enumerate(image_paths):
+        img = Image.open(p)
+        # 저해상도 이미지는 OCR 정확도를 위해 2배 확대
+        if min(img.size) < 1000:
+            img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
+        text = ocr_image(img, tess, ocr_lang)
+        header = f"===== {Path(p).name} =====" if len(image_paths) > 1 else ""
+        chunks.append(f"{header}\n{text}\n".lstrip())
+        if progress:
+            progress(i + 1, len(image_paths))
+
+    out_file.write_text("\n".join(chunks), encoding="utf-8")
+    return [out_file], out_dir, len(image_paths)
 
 
 def images_to_pdf(image_paths, progress=None):
@@ -360,6 +391,15 @@ class App:
             if not imgs:
                 messagebox.showinfo("안내", "먼저 이미지 파일(PNG/JPG 등)을 선택하세요.")
                 return
+        elif kind == "text":
+            if not pdfs and not imgs:
+                messagebox.showinfo("안내", "먼저 PDF 또는 이미지 파일을 선택하세요.")
+                return
+            if imgs and not find_tesseract():
+                messagebox.showwarning(
+                    "OCR 불가",
+                    "이미지 OCR에는 Tesseract가 필요합니다.\nREADME의 설치 안내를 참고하세요.")
+                return
         else:
             if not pdfs:
                 messagebox.showinfo("안내", "먼저 PDF 파일을 선택하세요.")
@@ -397,6 +437,11 @@ class App:
                         self.set_status(f"텍스트 추출 중… {label}")
                         saved, out_dir, ocr_used = pdf_to_text(pdf, pages, self.on_progress)
                         ocr_total += ocr_used
+                    all_saved += saved
+                if kind == "text" and imgs:
+                    self.set_status(f"이미지 {len(imgs)}장 OCR 중…")
+                    saved, out_dir, ocr_used = images_to_text(imgs, self.on_progress)
+                    ocr_total += ocr_used
                     all_saved += saved
 
             self.last_out_dir = out_dir
